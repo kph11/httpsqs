@@ -270,6 +270,21 @@ char *httpsqs_view(const char* httpsqs_input_name, int pos)
     
     return queue_value;
 }
+/* YY修订：查看单条队列一定范围的内容 */
+char **httpsqs_view(const char* httpsqs_input_name, int pos, int length)
+{
+    char *queue_value[length] = {0};
+    char queue_name[300] = {0}; /* 队列名称的总长度，用户输入的队列长度少于256字节 */
+    int total_len = 0;
+    
+    int len = sprintf(queue_name, "%s:%d", httpsqs_input_name, pos);
+    for(i=0;i<length;i++){
+        queue_value[i] = tcbdbget(httpsqs_db_tcbdb, queue_name, len, &len);
+        total_len += len;
+    }
+    
+    return queue_value;
+}
 
 /* 修改定时更新内存内容到磁盘的间隔时间，返回间隔时间（秒） */
 static int httpsqs_synctime(int httpsqs_input_num)
@@ -294,7 +309,9 @@ static int httpsqs_now_putpos(const char* httpsqs_input_name)
     /* 队列写入位置点加1 */
     ++queue_put_value;
     if (queue_put_value == queue_get_value) { /* 如果队列写入ID+1之后追上队列读取ID，则说明队列已满，返回0，拒绝继续写入 */
-        queue_put_value = 0;
+        // queue_put_value = 0;
+        /* YY修订：如果队列写入ID+1之后追上队列读取ID,则将读取ID+1，并继续执行队列写入 **/
+        httpsqs_write_metadata(httpsqs_input_name, ++queue_get_value, queue_put_value, maxqueue_num);
     }
     else if (queue_get_value <= 1 && queue_put_value > maxqueue_num) { /* 如果队列写入ID大于最大队列数量，并且从未进行过出队列操作（=0）或进行过1次出队列操作（=1），返回0，拒绝继续写入 */
         queue_put_value = 0;
