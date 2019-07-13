@@ -271,19 +271,21 @@ char *httpsqs_view(const char* httpsqs_input_name, int pos)
     return queue_value;
 }
 /* YY修订：查看单条队列一定范围的内容 */
-char **httpsqs_view(const char* httpsqs_input_name, int pos, int length)
+int httpsqs_view_rang(const char* httpsqs_input_name, int pos, int length, char **queue_value)
 {
-    char *queue_value[length] = {0};
     char queue_name[300] = {0}; /* 队列名称的总长度，用户输入的队列长度少于256字节 */
     int total_len = 0;
+    int i = 0;
     
-    int len = sprintf(queue_name, "%s:%d", httpsqs_input_name, pos);
+    int len = 0;
     for(i=0;i<length;i++){
-        queue_value[i] = tcbdbget(httpsqs_db_tcbdb, queue_name, len, &len);
+        len = sprintf(queue_name, "%s:%d", httpsqs_input_name, pos+i);
+        *queue_value = tcbdbget(httpsqs_db_tcbdb, queue_name, len, &len);
+        queue_value++;
         total_len += len;
     }
     
-    return queue_value;
+    return total_len;
 }
 
 /* 修改定时更新内存内容到磁盘的间隔时间，返回间隔时间（秒） */
@@ -379,8 +381,10 @@ void httpsqs_handler(struct evhttp_request *req, void *arg)
     const char *httpsqs_input_opt = evhttp_find_header (&httpsqs_http_query, "opt"); /* 操作类别 */
     const char *httpsqs_input_data = evhttp_find_header (&httpsqs_http_query, "data"); /* 操作类别 */
     const char *httpsqs_input_pos_tmp = evhttp_find_header (&httpsqs_http_query, "pos"); /* 队列位置点 字符型 */
+    const char *httpsqs_input_len_tmp = evhttp_find_header (&httpsqs_http_query, "len"); /* 队列位置点 字符型 */
     const char *httpsqs_input_num_tmp = evhttp_find_header (&httpsqs_http_query, "num"); /* 队列总长度 字符型 */
     int httpsqs_input_pos = 0;
+    int httpsqs_input_len = 0;
     int httpsqs_input_num = 0;
     
     /* 返回给用户的Header头信息 */
@@ -421,6 +425,9 @@ void httpsqs_handler(struct evhttp_request *req, void *arg)
         }
         if (httpsqs_input_num_tmp != NULL) {
             httpsqs_input_num = atoi(httpsqs_input_num_tmp); /* 队列总长度 数值型 */
+        }
+        if (httpsqs_input_len_tmp != NULL) {
+            httpsqs_input_len = atoi(httpsqs_input_len_tmp); /* 需要查看的长度 */
         }
 
         /*参数是否存在判断 */
@@ -484,7 +491,7 @@ void httpsqs_handler(struct evhttp_request *req, void *arg)
                     char *httpsqs_output_value;
                     httpsqs_output_value = tcbdbget(httpsqs_db_tcbdb, queue_name, len, &len);
                     if (httpsqs_output_value) {
-                        sprintf(queue_name, "%d", queue_get_value); 
+                        sprintf(queue_name, "%d", queue_get_value);
                         evhttp_add_header(req->output_headers, "Pos", queue_name);
                         evbuffer_add_printf(buf, "%s", httpsqs_output_value);
                         free(httpsqs_output_value);
@@ -534,14 +541,74 @@ void httpsqs_handler(struct evhttp_request *req, void *arg)
                     get_times = "1";
                 }
                 evbuffer_add_printf(buf, "{\"name\":\"%s\",\"maxqueue\":%d,\"putpos\":%d,\"putlap\":%s,\"getpos\":%d,\"getlap\":%s,\"unread\":%d}\n", httpsqs_input_name, maxqueue, putpos, put_times, getpos, get_times, ungetnum);
-            }           
+            }
             /* 查看单条队列内容 */
-            else if (strcmp(httpsqs_input_opt, "view") == 0 && httpsqs_input_pos >= 1 && httpsqs_input_pos <= 1000000000) {
-                char *httpsqs_output_value;
-                httpsqs_output_value = httpsqs_view ((char *)httpsqs_input_name, httpsqs_input_pos);
-                if (httpsqs_output_value) {
-                    evbuffer_add_printf(buf, "%s", httpsqs_output_value);
-                    free(httpsqs_output_value);
+            else if (strcmp(httpsqs_input_opt, "view") == 0 && httpsqs_input_pos >= 0 && httpsqs_input_pos <= 1000000000) {
+                /** YY修改，无pos参数的时候直接返回最近的一条记录 */
+                if(0 == httpsqs_input_pos){
+                    int getpos, putpos, maxqueue;
+                    httpsqs_read_metadata(httpsqs_input_name, &getpos, &putpos, &maxqueue);
+                    httpsqs_input_pos = putpos;
+                }
+                if(0 == httpsqs_input_pos){
+                    evbuffer_add_printf(buf, "%s", "HTTPSQS_EMPTY");
+                } else{
+                    char *httpsqs_output_value;
+                    httpsqs_output_value = httpsqs_view ((char *)httpsqs_input_name, httpsqs_input_pos);
+                    if (httpsqs_output_value) {
+                        evbuffer_add_printf(buf, "%s", httpsqs_output_value);
+                        free(httpsqs_output_value);
+                    }
+                }
+            }
+            /* YY修订：查看单条队列一定范围内的内容 */
+            else if (strcmp(httpsqs_input_opt, "view_rang") == 0 && httpsqs_input_pos >= 0 && (httpsqs_input_pos+httpsqs_input_len) <= 1000000000) {
+                /** YY修订：pos未设置的时候，直接返回最近的记录 */
+                if(0 == httpsqs_input_pos){
+                    int getpos, putpos, maxqueue;
+                    httpsqs_read_metadata(httpsqs_input_name, &getpos, &putpos, &maxqueue);
+                    httpsqs_input_pos = putpos - httpsqs_input_len;
+                    if(httpsqs_input_pos <= 0){
+                        httpsqs_input_pos = maxqueue + httpsqs_input_pos;
+                    }
+                }
+                char *httpsqs_output_value[httpsqs_input_len+1];
+                memset(httpsqs_output_value, 0, httpsqs_input_len+1);
+                int total_len = 0;
+                total_len = httpsqs_view_rang ((char *)httpsqs_input_name, httpsqs_input_pos, httpsqs_input_len, httpsqs_output_value);
+                for(int i=0;i<httpsqs_input_len;i++){
+                    if(0 == httpsqs_output_value[i]){
+                        break;
+                    }
+                    evbuffer_add_printf(buf, "%s", httpsqs_output_value[i]);
+                    free(httpsqs_output_value[i]);
+                }
+            }
+            /* YY修订：查看单条队列一定范围内的内容，将队列里面的数据当json对象处理 */
+            else if (strcmp(httpsqs_input_opt, "view_rang_json") == 0 && httpsqs_input_pos >= 0 && (httpsqs_input_pos+httpsqs_input_len) <= 1000000000) {
+                /** YY修订：pos未设置的时候，直接返回最近的记录 */
+                if(0 == httpsqs_input_pos){
+                    int getpos, putpos, maxqueue;
+                    httpsqs_read_metadata(httpsqs_input_name, &getpos, &putpos, &maxqueue);
+                    httpsqs_input_pos = putpos - httpsqs_input_len;
+                    if(httpsqs_input_pos <= 0){
+                        httpsqs_input_pos = maxqueue + httpsqs_input_pos;
+                    }
+                }
+                char *httpsqs_output_value[httpsqs_input_len+1];
+                memset(httpsqs_output_value, 0, httpsqs_input_len+1);
+                int total_len = 0;
+                total_len = httpsqs_view_rang ((char *)httpsqs_input_name, httpsqs_input_pos, httpsqs_input_len, httpsqs_output_value);
+                for(int i=0;i<httpsqs_input_len;i++){
+                    if(0 == i){
+                        evbuffer_add_printf(buf, "[%s,", httpsqs_output_value[i]);
+                    } else if(0 == httpsqs_output_value[i+1]){
+                        evbuffer_add_printf(buf, "%s]", httpsqs_output_value[i]);
+                        break;
+                    } else {
+                        evbuffer_add_printf(buf, "%s,", httpsqs_output_value[i]);
+                    }
+                    free(httpsqs_output_value[i]);
                 }
             }
             /* 重置队列 */
