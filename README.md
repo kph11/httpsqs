@@ -1,5 +1,6 @@
 # httpsqs
 fork of zhangyan's httpsqs
+参考： http://zyan.cc/httpsqs/
 
 # 编译安装
 ```
